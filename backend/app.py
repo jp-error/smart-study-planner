@@ -8,8 +8,8 @@ from flask_cors import CORS
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-r1:free")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
 
@@ -27,65 +27,58 @@ def index():
 def assistant():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-        
+
     try:
         data = request.get_json(force=True)
         prompt = data.get('prompt', '').strip()
         length_hint = float(data.get('length_hint', 1.0))
-        
+
         if not prompt:
             return jsonify({"error": "Prompt required"}), 400
+        if not GEMINI_API_KEY:
+            return jsonify({"error": "No GEMINI_API_KEY set in environment"}), 500
 
-        if not OPENROUTER_API_KEY:
-            return jsonify({"error": "No OPENROUTER_API_KEY set in environment"}), 500
+        max_tokens = 1000 if length_hint >= 1.5 else 250 if length_hint <= 0.5 else 500
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-        base_tokens = 500
-        if length_hint <= 0.5:
-            max_tokens = int(base_tokens * 0.5)
-        elif length_hint >= 1.5:
-            max_tokens = int(base_tokens * 2)
-        else:
-            max_tokens = base_tokens
-
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:5000",
-            "X-Title": "Study Planner AI"
-        }
-        
-        payload = {
-            "model": OPENROUTER_MODEL,
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": "You are a helpful, concise study assistant."
+        response = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY,
+            },
+            json={
+                "systemInstruction": {
+                    "parts": [{"text": "You are a helpful, concise study assistant."}]
                 },
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.7,
-            "max_tokens": max_tokens,
-            "top_p": 0.9
-        }
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "topP": 0.9,
+                    "maxOutputTokens": max_tokens,
+                },
+            },
+            timeout=30,
+        )
 
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        
         if response.status_code == 429:
-            return jsonify({
-                "error": "API rate limit exceeded.",
-                "retry_after": response.headers.get('Retry-After', '60')
-            }), 429
-            
+            return jsonify({"error": "Gemini API rate limit exceeded. Try again later."}), 429
+
         response.raise_for_status()
-        
         result = response.json()
-        text = result.get("choices", [{}])[0].get("message", {}).get("content", "No response received")
-        
-        return jsonify({"text": text, "model_used": OPENROUTER_MODEL})
-        
+        candidates = result.get("candidates", [])
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        answer = "".join(part.get("text", "") for part in parts).strip()
+
+        if not answer:
+            return jsonify({"error": "Gemini returned no text. Try again."}), 502
+
+        return jsonify({"text": answer, "model_used": GEMINI_MODEL})
+
     except requests.RequestException as e:
-        return jsonify({"error": f"API request failed: {str(e)}"}), 500
+        return jsonify({"error": f"Gemini API request failed: {str(e)}"}), 502
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid request data"}), 400
     except Exception as e:
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
